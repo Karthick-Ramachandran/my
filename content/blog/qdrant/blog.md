@@ -165,20 +165,88 @@ sagemaker_client = boto3.client('sagemaker')
 qdrant_client = QdrantClient(host="<QDRANT_HOSTNAME>")
 
 # Ingest data into Qdrant
-def ingest_data_into_qdrant(texts):
-    points = []
-    for idx, text in enumerate(texts):
-        embeddings = compute_embeddings(text)  # Replace with actual embedding computation
-        points.append(PointStruct(id=idx, vector=embeddings, payload={"text": text}))
-    
-    operation_info = qdrant_client.upsert(
-        collection_name="mycollection",
-        wait=True,
-        points=points
-    )
-    return operation_info
+```
+    import pdfplumber
+    from qdrant_client import QdrantClient, PointStruct
+    import boto3
+    import json
 
+    # Replace with your actual Qdrant hostname
+    QDRANT_HOSTNAME = "<QDRANT_HOSTNAME>"
+    # Replace with your actual SageMaker endpoint name
+    SAGEMAKER_ENDPOINT_NAME = "<SAGEMAKER_ENDPOINT_NAME>"
+
+    sagemaker_runtime = boto3.client('sagemaker-runtime')
+    qdrant_client = QdrantClient(host=QDRANT_HOSTNAME)
+
+    def compute_embeddings(text):
+        # Replace with your actual embedding computation code
+        embeddings = [0.1, 0.2, 0.3]  # Placeholder values
+        return embeddings
+
+    def ingest_data_into_qdrant_from_pdf(pdf_path):
+        texts = []
+        
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                texts.append(text)
+        
+        points = []
+        for idx, text in enumerate(texts):
+            embeddings = compute_embeddings(text)
+            points.append(PointStruct(id=idx, vector=embeddings, payload={"text": text}))
+        
+        operation_info = qdrant_client.upsert(
+            collection_name="mycollection",
+            wait=True,
+            points=points
+        )
+        return operation_info
+
+    def retrieve_similar_documents(query):
+        similar_documents = qdrant_client.search(
+            collection_name="mycollection",
+            vectors=[compute_embeddings(query)],  # Replace with query embeddings
+            top=3  # Retrieve the top 3 most similar documents
+        )
+        context = [document.payload['text'] for document in similar_documents]
+        return context
+
+    def process_user_query(query, context):
+        input_data = {
+            'context': context,
+            'query': query
+        }
+
+        response = sagemaker_runtime.invoke_endpoint(
+            EndpointName=SAGEMAKER_ENDPOINT_NAME,
+            ContentType='application/json',
+            Accept='application/json',
+            Body=json.dumps(input_data)
+        )
+        result = json.loads(response['Body'].read().decode())
+        return result['answer']
+```
+# User query
+user_query = "Tell me about the benefits of renewable energy."
+
+# Ingest data from PDF into Qdrant (replace with your PDF path)
+pdf_path = "path/to/your/pdf/document.pdf"
+ingest_data_info = ingest_data_into_qdrant_from_pdf(pdf_path)
+
+# Retrieve context from Qdrant
+context = retrieve_similar_documents(user_query)
+
+# Process query using SageMaker model and context
+response = process_user_query(user_query, context)
+
+print("Ingestion Operation Info:", ingest_data_info)
+print("ChatBot Response:", response)
+
+```
 # Retrieve similar documents from Qdrant and get context
+```
 def retrieve_similar_documents(query):
     similar_documents = qdrant_client.search(
         collection_name="mycollection",
@@ -187,9 +255,10 @@ def retrieve_similar_documents(query):
     )
     context = [document.payload['text'] for document in similar_documents]
     return context
-
+```
 # Process user query using SageMaker model and context
-def process_user_query(query, context):
+```
+ def process_user_query(query, context):
     endpoint_name = "<SAGEMAKER_ENDPOINT_NAME>"
     sagemaker_runtime = boto3.client('sagemaker-runtime')
 
@@ -206,7 +275,7 @@ def process_user_query(query, context):
     )
     result = json.loads(response['Body'].read().decode())
     return result['answer']
-
+```
 # User query
 user_query = "Tell me about the benefits of renewable energy."
 
@@ -270,7 +339,7 @@ Create a new Python file, such as app.py, and add the following code:
 
 import streamlit as st
 import requests
-
+```
 def get_answer(question):
     response = requests.post(
         url="<SAGEMAKER_REST_API_URL>",
@@ -291,7 +360,7 @@ if st.button("Get Answer"):
     else:
         st.write("Please enter a question.")
 
-
+```
 Replace <SAGEMAKER_REST_API_URL> with the actual REST API URL of your SageMaker model.
 
 ## Running the Streamlit App:
