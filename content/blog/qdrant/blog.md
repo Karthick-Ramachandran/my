@@ -351,7 +351,7 @@ def get_answer(question):
     return answer
 
 st.title("Question Answering ChatBot")
-
+```
 user_question = st.text_input("Ask a question:")
 if st.button("Get Answer"):
     if user_question:
@@ -372,9 +372,8 @@ Open a terminal and navigate to the directory where app.py is located.
 Run the Streamlit app using the following command:
 
 ```
-streamlit run app.py
+    streamlit run app.py
 
-```
 
 
 A new browser tab will open with your Streamlit app. Enter a question and click the "Get Answer" button to see the ChatBot's response.
@@ -405,9 +404,9 @@ Start the Streamlit App:
 Use the following command to start the Streamlit app on the EC2 instance:
 
 ```
-streamlit run app.py --server.port 80
 ```
-
+  streamlit run app.py --server.port 80
+```
 ## Conclusion
 
 Congratulations! You have successfully built a powerful Question Answering ChatBot using AWS SageMaker, Qdrant, and Langchain. By leveraging advanced machine learning and search technologies, you've created a tool that can provide accurate answers to user queries. This not only enhances user interactions but also showcases the potential of AI-powered applications in real-world scenarios.
