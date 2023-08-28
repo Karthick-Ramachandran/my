@@ -1,0 +1,449 @@
+Description: >
+    This template deploys an ECS cluster to the provided VPC, subnets
+    and using an Auto Scaling Group
+Parameters:
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+        Default: dev
+    LatestECSOptimizedAMI:
+      Description: AMI ID Of ECS host
+      Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+      Default: /aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id
+
+    InstanceType: 
+        Description: You should choose an instance type with a memory capacity of at least 2GB to build your ECS cluster?
+        Type: String
+        Default: t3.small
+
+    ClusterSize:
+        Description: How many ECS hosts do you want to initially deploy?
+        Type: Number
+        Default: 2
+    ClusterMaxSize:
+        Description: Maximum size of ECS host ?
+        Type: Number
+        Default: 5
+
+    VPC:
+        Description: Choose which VPC this ECS cluster should be deployed to
+        Type: AWS::EC2::VPC::Id
+
+    Subnets:
+        Description: Choose which subnets this ECS cluster should be deployed to
+        Type: List<AWS::EC2::Subnet::Id>
+
+    CIDR:
+        Description: CIDR range that you will allow SSH traffic from (default is from Default VPC only)
+        Type: String
+        Default: "0.0.0.0/0"
+        
+    KeyPair:
+        Description: Select the KeyPair that you would like to use for the ECS cluster hosts
+        Type: AWS::EC2::KeyPair::KeyName
+    DesiredCount:
+        Description: How many instances of this task should we run across our cluster?
+        Type: Number
+        Default: 1
+    TaskMaxCapacity:
+        Description: How many instances of this task Maximum should we run across our cluster?
+        Type: Number
+        Default: 6
+
+    Image:
+        Description: The qdrant docker image tag we want to run
+        Type: String
+        Default: qdrant/qdrant
+    LoadBalancerSubnetIds:
+        Type: List<AWS::EC2::Subnet::Id>
+        Description: Subnet in which to create load balancer instances
+Resources:
+
+    ECSCluster:
+        Type: AWS::ECS::Cluster
+        Properties:
+            ClusterName: !Ref EnvironmentName
+
+    ECSAutoScalingGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties: 
+            VPCZoneIdentifier: !Ref Subnets
+            LaunchConfigurationName: !Ref ECSLaunchConfiguration
+            MinSize: !Ref ClusterSize
+            MaxSize: !Ref ClusterMaxSize
+            DesiredCapacity: !Ref ClusterSize
+            Tags: 
+                - Key: Name
+                  Value: !Sub ${EnvironmentName} ECS host
+                  PropagateAtLaunch: true
+        CreationPolicy:
+            ResourceSignal: 
+                Timeout: PT15M
+        UpdatePolicy:
+            AutoScalingRollingUpdate:
+                MinInstancesInService: 1
+                MaxBatchSize: 1
+                PauseTime: PT15M
+                SuspendProcesses:
+                  - HealthCheck
+                  - ReplaceUnhealthy
+                  - AZRebalance
+                  - AlarmNotification
+                  - ScheduledActions
+                WaitOnResourceSignals: true
+    ECSLaunchConfiguration:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Properties:
+            ImageId:  !Ref LatestECSOptimizedAMI
+            InstanceType: !Ref InstanceType
+            SecurityGroups: 
+                - !Ref InstanceSecurityGroup
+            IamInstanceProfile: !Ref ECSInstanceProfile
+            KeyName: !Ref KeyPair
+            UserData: 
+                "Fn::Base64": !Sub |
+                    #!/bin/bash
+                    yum install -y aws-cfn-bootstrap
+                    /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSLaunchConfiguration
+                    /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSAutoScalingGroup
+        Metadata:
+            AWS::CloudFormation::Init:
+                config:
+                    commands:
+                        01_add_instance_to_cluster:
+                            command: !Sub echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+                    files:
+                        "/etc/cfn/cfn-hup.conf":
+                            mode: 000400
+                            owner: root
+                            group: root
+                            content: !Sub |
+                                [main]
+                                stack=${AWS::StackId}
+                                region=${AWS::Region}
+                        
+                        "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+                            content: !Sub |
+                                [cfn-auto-reloader-hook]
+                                triggers=post.update
+                                path=Resources.ECSLaunchConfiguration.Metadata.AWS::CloudFormation::Init
+                                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSLaunchConfiguration
+                    services: 
+                        sysvinit:
+                            cfn-hup: 
+                                enabled: true
+                                ensureRunning: true
+                                files: 
+                                    - /etc/cfn/cfn-hup.conf
+                                    - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+
+    MemScaleUpPolicy:
+      Type: AWS::AutoScaling::ScalingPolicy
+      Properties:
+        AutoScalingGroupName: !Ref ECSAutoScalingGroup
+        PolicyType: StepScaling
+        AdjustmentType: PercentChangeInCapacity
+        MetricAggregationType: Average
+        EstimatedInstanceWarmup: '120'
+        StepAdjustments:
+          - MetricIntervalLowerBound: '0'
+            MetricIntervalUpperBound: '10'
+            ScalingAdjustment: '50'
+          - MetricIntervalLowerBound: '10'
+            ScalingAdjustment: '100'
+
+    MemScaleDownPolicy:
+      Type: AWS::AutoScaling::ScalingPolicy
+      Properties:
+        AutoScalingGroupName: !Ref ECSAutoScalingGroup
+        PolicyType: StepScaling
+        AdjustmentType: PercentChangeInCapacity
+        MetricAggregationType: Average
+        EstimatedInstanceWarmup: '120'
+        StepAdjustments:
+          - MetricIntervalLowerBound: '-10'
+            MetricIntervalUpperBound: '0'
+            ScalingAdjustment: '-10'
+          - MetricIntervalUpperBound: '-10'
+            ScalingAdjustment: '-30'
+
+    MemResAlarmHigh:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmDescription: Memory alarm for ECS cluster high memory reserve
+        AlarmActions: [!Ref 'MemScaleUpPolicy']
+        MetricName: MemoryReservation
+        Namespace: AWS/ECS
+        Statistic: Average
+        Period: '60'
+        EvaluationPeriods: '3'
+        Threshold: '70'
+        ComparisonOperator: GreaterThanThreshold
+        Dimensions:
+          - Name: ClusterName
+            Value: !Ref ECSCluster
+
+    MemResAlarmLow:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmDescription: Memory alarm for ECS cluster low memory reserve
+        AlarmActions: [!Ref 'MemScaleDownPolicy']
+        MetricName: MemoryReservation
+        Namespace: AWS/ECS
+        Statistic: Average
+        Period: '60'
+        EvaluationPeriods: '10'
+        Threshold: '35'
+        ComparisonOperator: LessThanThreshold
+        Dimensions:
+          - Name: ClusterName
+            Value: !Ref ECSCluster
+    # This IAM Role is attached to all of the ECS hosts. It is based on the default role
+    # published here:
+    # http://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html
+    #
+    # You can add other IAM policy statements here to allow access from your ECS hosts
+    # to other AWS services. Please note that this role will be used by ALL containers
+    # running on the ECS host.
+
+    ECSRole:
+        Type: AWS::IAM::Role
+        Properties: 
+            Path: /
+            RoleName: !Sub ${EnvironmentName}-ECSRole-${AWS::Region}
+            AssumeRolePolicyDocument: |
+                {
+                    "Statement": [{
+                        "Action": "sts:AssumeRole",
+                        "Effect": "Allow",
+                        "Principal": { 
+                            "Service": "ec2.amazonaws.com" 
+                        }
+                    }]
+                }
+            ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+            - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+            - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+            Policies:
+                - PolicyName: logs
+                  PolicyDocument:
+                    Version: '2012-10-17'
+                    Statement:
+                    - Effect: Allow
+                      Action: 
+                        - logs:*
+                      Resource:
+                         - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+
+    ECSInstanceProfile: 
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Path: /
+            Roles: 
+                - !Ref ECSRole
+
+    InstanceSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupName: !Sub ${EnvironmentName}-SG
+            GroupDescription: Allow SSH to EC2 instances from !Ref CIDR
+            VpcId: !Ref VPC
+            SecurityGroupIngress:
+              - IpProtocol: tcp
+                FromPort: 22
+                ToPort: 22
+                CidrIp: !Ref CIDR
+              - SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+                IpProtocol: -1
+    LoadBalancerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+         GroupDescription: Security Group for load balancers which need to route traffic
+            to container instances
+         VpcId: !Ref 'VPC'
+         Tags:
+            - Key: Name
+              Value: !Sub 'ECS Load Balancer SG - ${AWS::StackName}'
+
+    LoadBalancerHTTPIngress1:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+            GroupId: !Ref LoadBalancerSecurityGroup
+            IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: "0.0.0.0/0"
+
+    LoadBalancer:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            Scheme: internet-facing
+            Subnets: !Ref 'LoadBalancerSubnetIds'
+            SecurityGroups: [!Ref 'LoadBalancerSecurityGroup']
+            Tags:
+                - Key: Name
+                  Value: !Sub 'ECS ALB - ${AWS::StackName}'
+    LoadBalancerListener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        DependsOn: LoadBalancer
+        Properties:
+            LoadBalancerArn: !Ref LoadBalancer
+            Port: 80
+            Protocol: HTTP
+            DefaultActions:
+                - Type: forward
+                  TargetGroupArn: !Ref DefaultTargetGroup
+
+    # We define a default target group here, as this is a mandatory Parameters
+    # when creating an Application Load Balancer Listener. This is not used, instead
+    # a target group is created per-service in each service template (../services/*)
+    DefaultTargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        DependsOn: LoadBalancer
+        Properties:
+            Name: !Sub ${EnvironmentName}-qdrant
+            VpcId: !Ref VPC
+            Port: 6333
+            Protocol: HTTP
+
+    Service:
+        Type: AWS::ECS::Service
+        DependsOn: LoadBalancerListener
+        Properties:
+            Cluster: !Ref EnvironmentName
+            Role: !Ref ServiceRole
+            HealthCheckGracePeriodSeconds: 30
+            DesiredCount: !Ref DesiredCount
+            TaskDefinition: !Ref TaskDefinition
+            PlacementStrategies:
+            - Type: spread
+              Field: host
+            LoadBalancers:
+            - ContainerName: !Sub ${EnvironmentName}-qdrant
+              ContainerPort: 6333
+              TargetGroupArn: !Ref DefaultTargetGroup
+    TaskDefinition:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+            Family: !Sub ${EnvironmentName}-qdrant
+            Volumes:
+             -  Name: qdrant-vol
+            ContainerDefinitions:
+             -  Name: !Sub ${EnvironmentName}-qdrant
+                MountPoints:
+                - SourceVolume: qdrant-vol
+                  ContainerPath:  /qdrant/storage
+                Essential: true
+                Image: !Ref Image
+                Cpu: 512
+                Memory: 768
+                PortMappings:
+                  - ContainerPort: 6333
+                    Protocol: "tcp"
+                    HostPort: 0
+                LogConfiguration:
+                  LogDriver: awslogs
+                  Options:
+                    awslogs-group: !Ref CloudWatchLogsGroup
+                    awslogs-region: !Ref AWS::Region
+                    awslogs-stream-prefix: qdrant
+    CloudWatchLogsGroup:
+        Type: AWS::Logs::LogGroup
+        Properties:
+         LogGroupName: !Ref AWS::StackName
+         RetentionInDays: 14
+
+
+    # This IAM Role grants the service access to register/unregister with the
+    # Application Load Balancer (ALB). It is based on the default documented here:
+    # http://docs.aws.amazon.com/AmazonECS/latest/developerguide/service_IAM_role.html
+    ServiceRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: !Sub ecs-service-${AWS::StackName}
+            Path: /
+            AssumeRolePolicyDocument: |
+                {
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": { "Service": [ "ecs.amazonaws.com" ]},
+                        "Action": [ "sts:AssumeRole" ]
+                    }]
+                }
+            Policies:
+            - PolicyName: !Sub ecs-service-${AWS::StackName}
+              PolicyDocument:
+                    {
+                        "Version": "2012-10-17",
+                        "Statement": [ {
+                        "Effect": "Allow",
+                        "Action": [
+                            "ec2:AuthorizeSecurityGroupIngress",
+                            "ec2:Describe*",
+                            "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+                            "elasticloadbalancing:Describe*",
+                            "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+                            "elasticloadbalancing:DeregisterTargets",
+                            "elasticloadbalancing:DescribeTargetGroups",
+                            "elasticloadbalancing:DescribeTargetHealth",
+                            "elasticloadbalancing:RegisterTargets"
+                        ],
+                        "Resource": "*"
+                        } ]
+                    }
+
+    ECSServiceAutoscaleRole:
+          Type: AWS::IAM::Role
+          Properties: 
+              Path: /
+              AssumeRolePolicyDocument: |
+                  {
+                      "Statement": [{
+                          "Action": "sts:AssumeRole",
+                          "Effect": "Allow",
+                          "Principal": { 
+                              "Service": "application-autoscaling.amazonaws.com" 
+                          }
+                      }]
+                  }
+              ManagedPolicyArns:
+              - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+    ScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      DependsOn: 
+       - Service
+       - ECSServiceAutoscaleRole
+      Properties:
+        ServiceNamespace: 'ecs'
+        ScalableDimension: 'ecs:service:DesiredCount'
+        ResourceId:
+          Fn::Join:
+            - '/'
+            - - service
+              - !Ref ECSCluster
+              - !GetAtt Service.Name
+        MinCapacity: 1
+        MaxCapacity: !Ref TaskMaxCapacity
+        RoleARN: !GetAtt ECSServiceAutoscaleRole.Arn
+
+    TargetTrackingScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: cpu75-target-tracking-scaling-policy
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref ScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 60
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+Outputs:
+  EcsClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref ECSCluster
+
+  LoadBalancerDNSName:
+    Description: DNS name of the Elastic Load Balancer
+    Value: !GetAtt LoadBalancer.DNSName
