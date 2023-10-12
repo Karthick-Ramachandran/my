@@ -180,8 +180,6 @@ qdrant_client = QdrantClient(host="<QDRANT_HOSTNAME>")
     qdrant_client = QdrantClient(host=QDRANT_HOSTNAME)
 
     def compute_embeddings(text):
-    for the given text using DistilBERT.
-    # Tokenize the text and obtain output from DistilBERT model
     inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
     with torch.no_grad():
         output = model(**inputs)
@@ -190,7 +188,7 @@ qdrant_client = QdrantClient(host="<QDRANT_HOSTNAME>")
     embeddings = output.last_hidden_state.mean(dim=1).squeeze().numpy()
     
     return embeddings
-    
+
     def ingest_data_into_qdrant_from_pdf(pdf_path):
         texts = []
         
